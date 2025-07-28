@@ -7,30 +7,10 @@ from mmdet.registry import MODELS
 from mmdet.utils import ConfigType, OptConfigType, OptMultiConfig
 from mmdet.models.detectors.single_stage import SingleStageDetector
 
-# torch.autograd.set_detect_anomaly(True)
-
-# torch.backends.cudnn.deterministic = True
-
 
 @MODELS.register_module()
 class DynamicYOLO(SingleStageDetector):
-    """Implementation of DynamicYOLO.
-
-    Args:
-        backbone (:obj:`ConfigDict` or dict): The backbone module.
-        neck (:obj:`ConfigDict` or dict): The neck module.
-        bbox_head (:obj:`ConfigDict` or dict): The bbox head module.
-        train_cfg (:obj:`ConfigDict` or dict, optional): The training config
-            of ATSS. Defaults to None.
-        test_cfg (:obj:`ConfigDict` or dict, optional): The testing config
-            of ATSS. Defaults to None.
-        data_preprocessor (:obj:`ConfigDict` or dict, optional): Config of
-            :class:`DetDataPreprocessor` to process the input data.
-            Defaults to None.
-        init_cfg (:obj:`ConfigDict` or dict, optional): the config to control
-            the initialization. Defaults to None.
-        use_syncbn (bool): Whether to use SyncBatchNorm. Defaults to True.
-    """
+    """Implementation of DynamicYOLO."""
 
     def __init__(self,
                  backbone: ConfigType,
@@ -39,8 +19,7 @@ class DynamicYOLO(SingleStageDetector):
                  train_cfg: OptConfigType = None,
                  test_cfg: OptConfigType = None,
                  data_preprocessor: OptConfigType = None,
-                 init_cfg: OptMultiConfig = None,
-                 ) -> None:
+                 init_cfg: OptMultiConfig = None) -> None:
         super().__init__(
             backbone=backbone,
             neck=neck,
@@ -49,3 +28,35 @@ class DynamicYOLO(SingleStageDetector):
             test_cfg=test_cfg,
             data_preprocessor=data_preprocessor,
             init_cfg=init_cfg)
+
+    def loss(self, inputs, data_samples, **kwargs):
+        # Ensure pad_shape is present using img_shape (which equals pad_shape after Pad step)
+        for data_sample in data_samples:
+            if 'pad_shape' not in data_sample.metainfo:
+                data_sample.set_metainfo(dict(pad_shape=data_sample.img_shape))
+
+        x = self.extract_feat(inputs)
+        return self.bbox_head.loss(x, data_samples)
+
+    def forward_train(self, images, batch_data_samples, **kwargs):
+        x = self.extract_feat(images)
+
+        for data_sample in batch_data_samples:
+            pad_shape = data_sample.metainfo.get('pad_shape', None)
+            if pad_shape is None:
+                pad_shape = data_sample.metainfo.get('img_shape', None)
+            if pad_shape is None:
+                raise ValueError('pad_shape and img_shape are both missing in metainfo')
+
+            # ✅ 设置到 DetDataSample 本身
+            data_sample.set_metainfo({'pad_shape': pad_shape})
+
+            # ✅ 设置到 gt_instances（AnchorHead 要求的地方）
+            if hasattr(data_sample, 'gt_instances'):
+                data_sample.gt_instances.pad_shape = pad_shape
+
+        losses = self.bbox_head.loss(x, batch_data_samples)
+        return losses
+
+
+

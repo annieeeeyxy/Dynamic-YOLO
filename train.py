@@ -9,7 +9,6 @@ from mmengine.logging import print_log
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', help='train config file path')
@@ -18,7 +17,7 @@ def parse_args():
         '--amp',
         action='store_true',
         default=False,
-        help='enable automatic-mixed-precision training')
+        help='enable automatic-mixed-precision training (only for GPU/NPU/MUSA)')
     parser.add_argument(
         '--auto-scale-lr',
         action='store_true',
@@ -29,18 +28,14 @@ def parse_args():
         type=str,
         const='auto',
         help='If specify checkpoint path, resume from it, while if not '
-        'specify, try to auto resume from the latest checkpoint '
-        'in the work directory.')
+             'specify, try to auto resume from the latest checkpoint '
+             'in the work directory.')
     parser.add_argument(
         '--cfg-options',
         nargs='+',
         action=DictAction,
         help='override some settings in the used config, the key-value pair '
-        'in xxx=yyy format will be merged into config file. If the value to '
-        'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
-        'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
-        'Note that the quotation marks are necessary and that no white space '
-        'is allowed.')
+             'in xxx=yyy format will be merged into config file.')
     parser.add_argument(
         '--launcher',
         choices=['none', 'pytorch', 'slurm', 'mpi'],
@@ -50,9 +45,7 @@ def parse_args():
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
-
     return args
-
 
 def main():
     args = parse_args()
@@ -63,43 +56,36 @@ def main():
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
-    # work_dir is determined in this priority: CLI > segment in file > filename
+    # work_dir priority: CLI > in file > filename
     if args.work_dir is not None:
-        # update configs according to CLI args if args.work_dir is not None
         cfg.work_dir = args.work_dir
     elif cfg.get('work_dir', None) is None:
-        # use config filename as default work_dir if cfg.work_dir is None
-        cfg.work_dir = osp.join('./work_dirs',
-                                osp.splitext(osp.basename(args.config))[0])
+        cfg.work_dir = osp.join('./work_dirs', osp.splitext(osp.basename(args.config))[0])
 
-    # enable automatic-mixed-precision training
-    if args.amp is True:
+    # --- AMP check: disallow on CPU-only ---
+    if args.amp:
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError('AMP (--amp) is not supported without GPU. Please remove --amp.')
+
         optim_wrapper = cfg.optim_wrapper.type
         if optim_wrapper == 'AmpOptimWrapper':
-            print_log(
-                'AMP training is already enabled in your config.',
-                logger='current',
-                level=logging.WARNING)
+            print_log('AMP training is already enabled in your config.', logger='current', level=logging.WARNING)
         else:
             assert optim_wrapper == 'OptimWrapper', (
-                '`--amp` is only supported when the optimizer wrapper type is '
-                f'`OptimWrapper` but got {optim_wrapper}.')
+                '`--amp` is only supported when the optimizer wrapper type is `OptimWrapper` '
+                f'but got {optim_wrapper}.')
             cfg.optim_wrapper.type = 'AmpOptimWrapper'
             cfg.optim_wrapper.loss_scale = 'dynamic'
 
-    # enable automatically scaling LR
+    # enable auto LR scaling
     if args.auto_scale_lr:
-        if 'auto_scale_lr' in cfg and \
-                'enable' in cfg.auto_scale_lr and \
-                'base_batch_size' in cfg.auto_scale_lr:
+        if 'auto_scale_lr' in cfg and 'enable' in cfg.auto_scale_lr and 'base_batch_size' in cfg.auto_scale_lr:
             cfg.auto_scale_lr.enable = True
         else:
-            raise RuntimeError('Can not find "auto_scale_lr" or '
-                               '"auto_scale_lr.enable" or '
-                               '"auto_scale_lr.base_batch_size" in your'
-                               ' configuration file.')
+            raise RuntimeError('Missing required keys for auto LR scaling in config.')
 
-    # resume is determined in this priority: resume from > auto_resume
+    # resume logic
     if args.resume == 'auto':
         cfg.resume = True
         cfg.load_from = None
@@ -107,18 +93,14 @@ def main():
         cfg.resume = True
         cfg.load_from = args.resume
 
-    # build the runner from config
+    # build runner
     if 'runner_type' not in cfg:
-        # build the default runner
         runner = Runner.from_cfg(cfg)
     else:
-        # build customized runner from the registry
-        # if 'runner_type' is set in the cfg
         runner = RUNNERS.build(cfg)
 
-    # start training
+    # train
     runner.train()
-
 
 if __name__ == '__main__':
     main()
